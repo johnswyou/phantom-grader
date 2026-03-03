@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "phantom-grader"
+version = "0.1.0"
+description = "Agentic auto-grading system for handwritten physics and math assignments"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "google-genai>=1.0.0",
+    "typer>=0.15.0",
+    "pydantic>=2.0",
+    "pymupdf>=1.24.0",
+    "pillow>=10.0",
+    "rich>=13.0",
+]
+
+[project.scripts]
+phantom-grader = "phantom_grader.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/phantom_grader"]
