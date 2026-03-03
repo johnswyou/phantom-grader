@@ -6,3 +6,5 @@ dist/
 build/
 .eggs/
 test_output/
+assignment1_output/
+test_output/
