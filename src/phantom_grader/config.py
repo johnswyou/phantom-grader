@@ -5,8 +5,8 @@ from __future__ import annotations
 import os
 
 # Models
-FLASH_MODEL = "gemini-2.5-flash"
-PRO_MODEL = "gemini-2.5-pro"
+FLASH_MODEL = "gemini-3-flash-preview"
+PRO_MODEL = "gemini-3.1-pro-preview"
 
 # Rate limiting
 MAX_CONCURRENT_STUDENTS = 3
