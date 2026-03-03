@@ -1,0 +1,194 @@
+"""Vision API abstraction for Gemini."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+import sys
+from pathlib import Path
+from typing import Any
+
+from google import genai
+from google.genai import types
+from PIL import Image
+
+from . import config
+
+
+_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    global _semaphore
+    if _semaphore is None:
+        _semaphore = asyncio.Semaphore(config.API_SEMAPHORE_LIMIT)
+    return _semaphore
+
+
+def get_client(api_key: str) -> genai.Client:
+    """Create a Gemini client."""
+    return genai.Client(api_key=api_key)
+
+
+def load_image_part(image_path: Path) -> types.Part:
+    """Load an image file as a Gemini Part, resizing if needed."""
+    path = Path(image_path)
+    data = path.read_bytes()
+
+    # Resize if over limit
+    if len(data) > config.MAX_IMAGE_SIZE_BYTES:
+        img = Image.open(path)
+        quality = 85
+        while len(data) > config.MAX_IMAGE_SIZE_BYTES and quality > 20:
+            import io
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=quality)
+            data = buf.getvalue()
+            quality -= 10
+
+    suffix = path.suffix.lower()
+    mime_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
+    mime = mime_map.get(suffix, "image/jpeg")
+
+    return types.Part.from_bytes(data=data, mime_type=mime)
+
+
+def load_images_from_dir(directory: Path, sort: bool = True) -> list[types.Part]:
+    """Load all images from a directory as Gemini Parts."""
+    d = Path(directory)
+    exts = {".jpg", ".jpeg", ".png"}
+    files = [f for f in d.iterdir() if f.suffix.lower() in exts]
+    if sort:
+        files.sort()
+    return [load_image_part(f) for f in files]
+
+
+def image_paths_from_dir(directory: Path, sort: bool = True) -> list[Path]:
+    """Get sorted list of image paths from a directory."""
+    d = Path(directory)
+    exts = {".jpg", ".jpeg", ".png"}
+    files = [f for f in d.iterdir() if f.suffix.lower() in exts]
+    if sort:
+        files.sort()
+    return files
+
+
+def _extract_text(response) -> str:
+    """Extract text from a Gemini response, handling thinking models."""
+    # Iterate through candidates/parts, skipping thought parts
+    text_parts = []
+    try:
+        for candidate in response.candidates:
+            if candidate.content and candidate.content.parts:
+                for part in candidate.content.parts:
+                    # Skip thought parts from thinking models
+                    if hasattr(part, "thought") and part.thought:
+                        continue
+                    if hasattr(part, "text") and part.text:
+                        text_parts.append(part.text)
+    except (AttributeError, TypeError) as e:
+        print(f"  [debug] Error iterating response parts: {e}", file=sys.stderr)
+
+    if text_parts:
+        return "\n".join(text_parts)
+
+    # Try .text as fallback
+    try:
+        if response.text is not None:
+            return response.text
+    except (AttributeError, ValueError):
+        pass
+
+    # Log details about the response for debugging
+    finish_reason = None
+    try:
+        finish_reason = response.candidates[0].finish_reason if response.candidates else None
+    except Exception:
+        pass
+    print(f"  [debug] No text in response. finish_reason={finish_reason}", file=sys.stderr)
+    raise RuntimeError(f"No text content in Gemini response (finish_reason={finish_reason})")
+
+
+async def call_vision(
+    client: genai.Client,
+    model: str,
+    prompt: str,
+    images: list[types.Part] | None = None,
+    temperature: float = 0.2,
+    max_output_tokens: int = 65536,
+) -> str:
+    """Call the Gemini vision API with retry logic.
+
+    Returns the text response.
+    """
+    sem = _get_semaphore()
+
+    contents: list[Any] = []
+    if images:
+        contents.extend(images)
+    contents.append(prompt)
+
+    # Build generation config
+    gen_config = types.GenerateContentConfig(
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+        thinking_config=types.ThinkingConfig(
+            thinking_budget=8192,
+        ),
+    )
+
+    last_error = None
+    for attempt in range(config.API_RETRY_ATTEMPTS):
+        try:
+            async with sem:
+                response = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model=model,
+                    contents=contents,
+                    config=gen_config,
+                )
+            return _extract_text(response)
+        except Exception as e:
+            last_error = e
+            if attempt < config.API_RETRY_ATTEMPTS - 1:
+                delay = config.API_RETRY_BASE_DELAY * (2 ** attempt)
+                print(f"  [retry] Attempt {attempt+1} failed: {e}. Retrying in {delay}s...", file=sys.stderr)
+                await asyncio.sleep(delay)
+            else:
+                raise RuntimeError(
+                    f"Gemini API call failed after {config.API_RETRY_ATTEMPTS} attempts: {last_error}"
+                ) from last_error
+    return ""  # unreachable
+
+
+def extract_json_from_response(text: str) -> Any:
+    """Extract JSON from a Gemini response, handling markdown code fences."""
+    if not text or not text.strip():
+        raise ValueError("Empty response text, cannot extract JSON")
+
+    # Try to find JSON in code fences
+    match = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
+    if match:
+        json_str = match.group(1).strip()
+    else:
+        # Try to find a JSON object or array in the text
+        # Look for the first { or [ and last } or ]
+        json_str = text.strip()
+        start = -1
+        for i, c in enumerate(json_str):
+            if c in ('{', '['):
+                start = i
+                break
+        if start >= 0:
+            end_char = '}' if json_str[start] == '{' else ']'
+            end = json_str.rfind(end_char)
+            if end > start:
+                json_str = json_str[start:end + 1]
+
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError as e:
+        # Log a snippet for debugging
+        snippet = json_str[:500] if len(json_str) > 500 else json_str
+        raise ValueError(f"Failed to parse JSON from response: {e}\nSnippet: {snippet}") from e
