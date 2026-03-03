@@ -58,13 +58,26 @@ class Rubric(BaseModel):
 class ExtractedAnswer(BaseModel):
     response_type: str  # "mcq" or "free_response"
     selected: str | None = None  # for MCQ
-    work_shown: str = ""
-    final_answer: str = ""
+    work_shown: str | None = ""
+    final_answer: str | None = ""
     confidence: float = 0.0
-    evidence: str = ""
+    evidence: str | None = ""
     source_pages: list[int] = Field(default_factory=list)
-    alignment_method: str = ""
-    flags: list[str] = Field(default_factory=list)
+    alignment_method: str | None = ""
+    flags: list[str] | None = Field(default_factory=list)
+
+    def model_post_init(self, __context) -> None:
+        # Normalize None → defaults
+        if self.work_shown is None:
+            self.work_shown = ""
+        if self.final_answer is None:
+            self.final_answer = ""
+        if self.evidence is None:
+            self.evidence = ""
+        if self.alignment_method is None:
+            self.alignment_method = ""
+        if self.flags is None:
+            self.flags = []
 
 
 class StudentExtraction(BaseModel):
@@ -77,18 +90,28 @@ class StudentExtraction(BaseModel):
 # ── Stage 4: Grading ────────────────────────────────────────────────────────
 
 class CriterionGrade(BaseModel):
-    criterion: str
-    earned: int | float
-    possible: int | float
-    note: str = ""
+    criterion: str = ""
+    earned: int | float = 0
+    possible: int | float = 0
+    note: str | None = ""
+
+    def model_post_init(self, __context) -> None:
+        if self.note is None:
+            self.note = ""
 
 
 class QuestionGrade(BaseModel):
-    points_earned: int | float
-    points_possible: int | float
+    points_earned: int | float = 0
+    points_possible: int | float = 0
     correct: bool | None = None  # for MCQ
-    criteria_breakdown: list[CriterionGrade] = Field(default_factory=list)
-    feedback: str = ""
+    criteria_breakdown: list[CriterionGrade] | None = Field(default_factory=list)
+    feedback: str | None = ""
+
+    def model_post_init(self, __context) -> None:
+        if self.criteria_breakdown is None:
+            self.criteria_breakdown = []
+        if self.feedback is None:
+            self.feedback = ""
 
 
 class StudentGrades(BaseModel):

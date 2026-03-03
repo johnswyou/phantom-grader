@@ -90,7 +90,14 @@ Return ONLY valid JSON in this exact format:
     )
 
     data = extract_json_from_response(response)
-    questions = [Question(**q) for q in data["questions"]]
+    questions = []
+    for q in data["questions"]:
+        # Normalize nulls to empty lists for list fields
+        if q.get("options") is None:
+            q["options"] = []
+        if q.get("sub_parts") is None:
+            q["sub_parts"] = []
+        questions.append(Question(**q))
 
     total_points = sum(int(v) for v in points_per_page.values())
 
