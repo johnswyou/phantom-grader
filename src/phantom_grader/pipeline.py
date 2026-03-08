@@ -25,6 +25,7 @@ from .stages import (
     generate_solutions_and_rubric,
     grade_student,
     parse_assignment,
+    verify_solutions,
 )
 from .vision import get_client
 
@@ -81,6 +82,9 @@ async def run_pipeline(
     api_key: str,
     ocr_dir: Path | None = None,
     student_filter: str | None = None,
+    *,
+    flash_model: str | None = None,
+    pro_model: str | None = None,
 ) -> None:
     """Run the full grading pipeline."""
 
@@ -97,7 +101,7 @@ async def run_pipeline(
         console.print("  Loading cached manifest...")
         manifest = QuestionManifest.model_validate_json(manifest_path.read_text())
     else:
-        manifest = await parse_assignment(client, blank_dir, points_file)
+        manifest = await parse_assignment(client, blank_dir, points_file, flash_model=flash_model)
         _save_json(manifest, manifest_path)
     console.print(
         f"  Found [green]{len(manifest.questions)}[/] questions across "
@@ -116,7 +120,7 @@ async def run_pipeline(
         rubric = Rubric.model_validate_json(rubric_path.read_text())
     else:
         solutions, rubric = await generate_solutions_and_rubric(
-            client, manifest, blank_dir
+            client, manifest, blank_dir, pro_model=pro_model
         )
         _save_json(solutions, solutions_path)
         _save_json(rubric, rubric_path)
@@ -124,6 +128,20 @@ async def run_pipeline(
         f"  Generated solutions for [green]{len(solutions.solutions)}[/] questions, "
         f"rubric for [green]{len(rubric.rubric)}[/] questions"
     )
+
+    # ── Solution Verification ────────────────────────────────────────
+    verification_path = output_dir / "solution_verification.json"
+    if not verification_path.exists():
+        console.print("  Verifying solutions...")
+        verification = await verify_solutions(
+            client, manifest, solutions, blank_dir, flash_model=flash_model
+        )
+        _save_json(verification, verification_path)
+        flagged = {qid: v for qid, v in verification.items() if not v.get("verified", True)}
+        if flagged:
+            console.print(f"  [yellow]Warning:[/] {len(flagged)} solution(s) flagged during verification:")
+            for qid, v in flagged.items():
+                console.print(f"    [yellow]{qid}:[/] {v.get('note', 'unverified')}")
 
     # ── Discover Students ────────────────────────────────────────────
     all_students = discover_students(student_dir)
@@ -160,7 +178,8 @@ async def run_pipeline(
                 )
             else:
                 extraction = await extract_student_answers(
-                    client, manifest, stu_dir, name, blank_dir, ocr_text
+                    client, manifest, stu_dir, name, blank_dir, ocr_text,
+                    flash_model=flash_model,
                 )
                 _save_json(extraction, extraction_path)
 
@@ -182,7 +201,8 @@ async def run_pipeline(
                 grades = StudentGrades.model_validate_json(grades_path.read_text())
             else:
                 grades = await grade_student(
-                    client, manifest, extraction, rubric, solutions, stu_dir, blank_dir
+                    client, manifest, extraction, rubric, solutions, stu_dir, blank_dir,
+                    pro_model=pro_model,
                 )
                 _save_json(grades, grades_path)
 

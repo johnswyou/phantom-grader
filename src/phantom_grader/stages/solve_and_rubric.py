@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from pathlib import Path
 
 from google import genai
 
 from .. import config
 from ..models import (
+    Question,
     QuestionManifest,
     QuestionRubric,
     Rubric,
@@ -23,42 +26,39 @@ from ..vision import (
     load_image_part,
 )
 
+logger = logging.getLogger(__name__)
 
-async def generate_solutions_and_rubric(
+
+async def _solve_page(
     client: genai.Client,
-    manifest: QuestionManifest,
-    blank_dir: Path,
-) -> tuple[SolutionManual, Rubric]:
-    """Stage 2: Solve all questions and generate rubric."""
+    page_num: int,
+    page_questions: list[Question],
+    page_image_path: Path,
+    page_points: int,
+    model: str,
+) -> dict:
+    """Solve questions for a single page and return raw parsed JSON data."""
+    image = load_image_part(page_image_path)
 
-    blank_dir = Path(blank_dir)
-    image_paths = image_paths_from_dir(blank_dir)
-
-    # Group questions by page for efficient batching
-    pages_with_questions: dict[int, list] = {}
-    for q in manifest.questions:
-        pages_with_questions.setdefault(q.page, []).append(q)
-
-    # Build the full question list with sub-parts expanded
+    # Build question list for this page, expanding sub-parts
     question_ids = []
-    for q in manifest.questions:
+    for q in page_questions:
         if q.sub_parts:
             for sp in q.sub_parts:
                 question_ids.append(f"{q.id}{sp}")
         else:
             question_ids.append(q.id)
 
-    # Send all pages + manifest to the model and ask for solutions + rubric
-    images = [load_image_part(p) for p in image_paths]
+    questions_json = json.dumps(
+        [q.model_dump() for q in page_questions], indent=2
+    )
 
-    manifest_json = manifest.model_dump_json(indent=2)
+    prompt = f"""You are an expert AP Physics / Math teacher. I'm showing you page {page_num} of a blank assignment template.
 
-    prompt = f"""You are an expert AP Physics / Math teacher. I'm showing you all pages of a blank assignment template.
+Here are the questions on this page:
+{questions_json}
 
-Here is the question manifest:
-{manifest_json}
-
-For EVERY question (and sub-part if applicable), provide:
+For EVERY question on this page (and sub-part if applicable), provide:
 1. A complete, correct solution with all work shown
 2. A grading rubric with partial credit criteria
 
@@ -70,8 +70,7 @@ For free-response: break down into meaningful rubric criteria that add up to the
 
 CRITICAL: For questions with sub-parts, distribute the question's total points across the sub-parts reasonably. The sub-part points must sum to the question's total points.
 
-CRITICAL: The sum of all question points on each page MUST match these page totals:
-{json.dumps(manifest.points_per_page, indent=2)}
+CRITICAL: The sum of all question points on this page MUST equal {page_points}.
 
 Return ONLY valid JSON in this format:
 ```json
@@ -81,11 +80,6 @@ Return ONLY valid JSON in this format:
       "answer": "A",
       "explanation": "By Coulomb's law...",
       "key_steps": ["step1", "step2"]
-    }},
-    "Q14A": {{
-      "answer": "ΔU_g = mgh = ...",
-      "explanation": "...",
-      "key_steps": ["Identify h = L(1-cosθ)", "Substitute values"]
     }}
   }},
   "rubric": {{
@@ -94,39 +88,164 @@ Return ONLY valid JSON in this format:
       "criteria": [
         {{"points": 2, "description": "Correct answer (A)", "type": "all_or_nothing"}}
       ]
-    }},
-    "Q14A": {{
-      "total_points": 5,
-      "criteria": [
-        {{"points": 2, "description": "Correct setup", "type": "partial"}},
-        {{"points": 2, "description": "Correct calculation", "type": "partial"}},
-        {{"points": 1, "description": "Final answer with units", "type": "partial"}}
-      ]
     }}
   }}
 }}
 ```"""
 
     response = await call_vision(
-        client, config.PRO_MODEL, prompt, images, temperature=0.1
+        client, model, prompt, [image], temperature=0.1
     )
+    return extract_json_from_response(response)
 
-    data = extract_json_from_response(response)
 
-    # Parse solutions
-    solutions = {}
-    for qid, sol_data in data.get("solutions", {}).items():
-        solutions[qid] = Solution(**sol_data)
-    solution_manual = SolutionManual(solutions=solutions)
+async def generate_solutions_and_rubric(
+    client: genai.Client,
+    manifest: QuestionManifest,
+    blank_dir: Path,
+    *,
+    pro_model: str | None = None,
+) -> tuple[SolutionManual, Rubric]:
+    """Stage 2: Solve all questions and generate rubric.
 
-    # Parse rubric
-    rubric_items = {}
-    for qid, rub_data in data.get("rubric", {}).items():
-        criteria = [RubricCriterion(**c) for c in rub_data.get("criteria", [])]
-        rubric_items[qid] = QuestionRubric(
-            total_points=rub_data["total_points"],
-            criteria=criteria,
-        )
-    rubric = Rubric(rubric=rubric_items)
+    Batches by page: each page's questions are solved in a separate LLM call,
+    all pages run in parallel, and results are merged.
+    """
+    blank_dir = Path(blank_dir)
+    image_paths = image_paths_from_dir(blank_dir)
+    model = pro_model or config.PRO_MODEL
 
-    return solution_manual, rubric
+    # Group questions by page
+    pages_with_questions: dict[int, list[Question]] = {}
+    for q in manifest.questions:
+        pages_with_questions.setdefault(q.page, []).append(q)
+
+    # Launch per-page solve calls in parallel
+    tasks = []
+    page_order = []
+    for page_num in sorted(pages_with_questions.keys()):
+        page_questions = pages_with_questions[page_num]
+        # Get the image for this page (1-indexed)
+        if page_num - 1 < len(image_paths):
+            page_image = image_paths[page_num - 1]
+        else:
+            logger.warning("No image found for page %d, skipping", page_num)
+            continue
+        page_points = manifest.points_per_page.get(str(page_num), 0)
+        tasks.append(_solve_page(client, page_num, page_questions, page_image, page_points, model))
+        page_order.append(page_num)
+
+    results = await asyncio.gather(*tasks)
+
+    # Merge all page results
+    all_solutions: dict[str, Solution] = {}
+    all_rubric_items: dict[str, QuestionRubric] = {}
+
+    for page_num, data in zip(page_order, results):
+        for qid, sol_data in data.get("solutions", {}).items():
+            all_solutions[qid] = Solution(**sol_data)
+        for qid, rub_data in data.get("rubric", {}).items():
+            criteria = [RubricCriterion(**c) for c in rub_data.get("criteria", [])]
+            all_rubric_items[qid] = QuestionRubric(
+                total_points=rub_data["total_points"],
+                criteria=criteria,
+            )
+
+    return SolutionManual(solutions=all_solutions), Rubric(rubric=all_rubric_items)
+
+
+async def verify_solutions(
+    client: genai.Client,
+    manifest: QuestionManifest,
+    solutions: SolutionManual,
+    blank_dir: Path,
+    *,
+    flash_model: str | None = None,
+) -> dict:
+    """Verify generated solutions for correctness.
+
+    Returns a dict: {question_id: {"verified": bool, "note": str}}
+    For MCQ: if manifest has embedded_answer, compare directly (no LLM).
+    For free-response: send solution + page image to Flash and ask for verification.
+    """
+    blank_dir = Path(blank_dir)
+    image_paths = image_paths_from_dir(blank_dir)
+    model = flash_model or config.FLASH_MODEL
+
+    # Build question lookup
+    question_by_id: dict[str, Question] = {}
+    for q in manifest.questions:
+        if q.sub_parts:
+            for sp in q.sub_parts:
+                question_by_id[f"{q.id}{sp}"] = q
+        else:
+            question_by_id[q.id] = q
+
+    results: dict[str, dict] = {}
+    llm_tasks: list[tuple[str, asyncio.Task]] = []
+
+    for qid, solution in solutions.solutions.items():
+        q = question_by_id.get(qid)
+        if q is None:
+            results[qid] = {"verified": False, "note": "Question ID not found in manifest"}
+            continue
+
+        # MCQ with embedded_answer: direct comparison
+        if q.type == "mcq" and q.embedded_answer:
+            match = solution.answer.strip().upper() == q.embedded_answer.strip().upper()
+            results[qid] = {
+                "verified": match,
+                "note": "" if match else f"Solution '{solution.answer}' != embedded answer '{q.embedded_answer}'",
+            }
+            continue
+
+        # Need LLM verification
+        page_idx = q.page - 1
+        page_image = load_image_part(image_paths[page_idx]) if page_idx < len(image_paths) else None
+
+        prompt = f"""Here is a physics/math question and a proposed solution. Is the solution correct?
+Check: arithmetic, units, signs, logical steps.
+
+Question ID: {qid}
+Question type: {q.type}
+Question snippet: {q.text_snippet}
+Points: {q.points}
+
+Proposed solution:
+Answer: {solution.answer}
+Explanation: {solution.explanation}
+Key steps: {json.dumps(solution.key_steps)}
+
+Respond with ONLY valid JSON:
+```json
+{{"correct": true, "issues": []}}
+```
+or
+```json
+{{"correct": false, "issues": ["list of issues"]}}
+```"""
+
+        images = [page_image] if page_image else None
+
+        async def _verify(qid_inner: str, p: str, imgs):
+            resp = await call_vision(client, model, p, imgs, temperature=0.1)
+            return qid_inner, extract_json_from_response(resp)
+
+        llm_tasks.append(asyncio.ensure_future(_verify(qid, prompt, images)))
+
+    # Run all LLM verification calls in parallel
+    if llm_tasks:
+        llm_results = await asyncio.gather(*llm_tasks, return_exceptions=True)
+        for result in llm_results:
+            if isinstance(result, Exception):
+                logger.warning("Verification call failed: %s", result)
+                continue
+            qid, data = result
+            correct = data.get("correct", True)
+            issues = data.get("issues", [])
+            results[qid] = {
+                "verified": correct,
+                "note": "; ".join(issues) if issues else "",
+            }
+
+    return results

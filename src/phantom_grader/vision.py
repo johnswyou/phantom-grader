@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -15,15 +15,23 @@ from PIL import Image
 
 from . import config
 
+logger = logging.getLogger(__name__)
 
-_semaphore: asyncio.Semaphore | None = None
+_flash_semaphore: asyncio.Semaphore | None = None
+_pro_semaphore: asyncio.Semaphore | None = None
 
 
-def _get_semaphore() -> asyncio.Semaphore:
-    global _semaphore
-    if _semaphore is None:
-        _semaphore = asyncio.Semaphore(config.API_SEMAPHORE_LIMIT)
-    return _semaphore
+def _get_model_semaphore(model: str) -> asyncio.Semaphore:
+    """Return the appropriate semaphore for the given model."""
+    global _flash_semaphore, _pro_semaphore
+    if "flash" in model.lower():
+        if _flash_semaphore is None:
+            _flash_semaphore = asyncio.Semaphore(config.FLASH_SEMAPHORE_LIMIT)
+        return _flash_semaphore
+    else:
+        if _pro_semaphore is None:
+            _pro_semaphore = asyncio.Semaphore(config.PRO_SEMAPHORE_LIMIT)
+        return _pro_semaphore
 
 
 def get_client(api_key: str) -> genai.Client:
@@ -88,7 +96,7 @@ def _extract_text(response) -> str:
                     if hasattr(part, "text") and part.text:
                         text_parts.append(part.text)
     except (AttributeError, TypeError) as e:
-        print(f"  [debug] Error iterating response parts: {e}", file=sys.stderr)
+        logger.debug("Error iterating response parts: %s", e)
 
     if text_parts:
         return "\n".join(text_parts)
@@ -106,7 +114,7 @@ def _extract_text(response) -> str:
         finish_reason = response.candidates[0].finish_reason if response.candidates else None
     except Exception:
         pass
-    print(f"  [debug] No text in response. finish_reason={finish_reason}", file=sys.stderr)
+    logger.debug("No text in response. finish_reason=%s", finish_reason)
     raise RuntimeError(f"No text content in Gemini response (finish_reason={finish_reason})")
 
 
@@ -122,7 +130,7 @@ async def call_vision(
 
     Returns the text response.
     """
-    sem = _get_semaphore()
+    sem = _get_model_semaphore(model)
 
     contents: list[Any] = []
     if images:
@@ -142,8 +150,7 @@ async def call_vision(
     for attempt in range(config.API_RETRY_ATTEMPTS):
         try:
             async with sem:
-                response = await asyncio.to_thread(
-                    client.models.generate_content,
+                response = await client.aio.models.generate_content(
                     model=model,
                     contents=contents,
                     config=gen_config,
@@ -153,7 +160,7 @@ async def call_vision(
             last_error = e
             if attempt < config.API_RETRY_ATTEMPTS - 1:
                 delay = config.API_RETRY_BASE_DELAY * (2 ** attempt)
-                print(f"  [retry] Attempt {attempt+1} failed: {e}. Retrying in {delay}s...", file=sys.stderr)
+                logger.warning("Attempt %d failed: %s. Retrying in %ss...", attempt + 1, e, delay)
                 await asyncio.sleep(delay)
             else:
                 raise RuntimeError(
@@ -234,10 +241,7 @@ Return ONLY valid JSON:
 
         return regions
     except Exception as e:
-        print(
-            f"  [debug] Region detection failed for page {page_number}: {e}",
-            file=sys.stderr,
-        )
+        logger.debug("Region detection failed for page %d: %s", page_number, e)
         return []
 
 

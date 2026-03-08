@@ -10,7 +10,8 @@ PRO_MODEL = "gemini-3.1-pro-preview"
 
 # Rate limiting
 MAX_CONCURRENT_STUDENTS = 3
-API_SEMAPHORE_LIMIT = 5  # max concurrent API calls
+FLASH_SEMAPHORE_LIMIT = 8
+PRO_SEMAPHORE_LIMIT = 3
 API_RETRY_ATTEMPTS = 3
 API_RETRY_BASE_DELAY = 2.0  # seconds
 

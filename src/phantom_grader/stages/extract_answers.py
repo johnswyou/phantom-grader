@@ -28,6 +28,8 @@ from ..vision import (
 async def _detect_blank_pages_vision(
     client: genai.Client,
     student_paths: list[Path],
+    *,
+    flash_model: str | None = None,
 ) -> dict[int, bool]:
     """Use vision to detect which student pages have NO student-added content.
 
@@ -72,8 +74,9 @@ Return ONLY valid JSON:
 }}
 ```"""
 
+    model = flash_model or config.FLASH_MODEL
     response = await call_vision(
-        client, config.FLASH_MODEL, prompt, images, temperature=0.1
+        client, model, prompt, images, temperature=0.1
     )
 
     data = extract_json_from_response(response)
@@ -95,6 +98,8 @@ async def extract_student_answers(
     student_name: str,
     blank_dir: Path,
     ocr_text: str | None = None,
+    *,
+    flash_model: str | None = None,
 ) -> StudentExtraction:
     """Stage 3: Extract and align student answers to questions.
 
@@ -128,8 +133,10 @@ async def extract_student_answers(
             alignment_warnings=["No student images found"],
         )
 
+    flash = flash_model or config.FLASH_MODEL
+
     # ── Step 0: Vision-based blank page detection ──
-    blank_pages = await _detect_blank_pages_vision(client, student_paths)
+    blank_pages = await _detect_blank_pages_vision(client, student_paths, flash_model=flash)
     blank_page_nums = sorted([p for p, is_blank in blank_pages.items() if is_blank])
     non_blank_page_nums = sorted([p for p, is_blank in blank_pages.items() if not is_blank])
 
@@ -203,6 +210,7 @@ OCR text from the student's submission (for cross-reference only — images are 
             manifest_json,
             blank_page_note,
             ocr_context,
+            flash_model=flash,
         )
     else:
         response = await _extract_without_zoom(
@@ -214,6 +222,7 @@ OCR text from the student's submission (for cross-reference only — images are 
             manifest_json,
             blank_page_note,
             ocr_context,
+            flash_model=flash,
         )
 
     data = extract_json_from_response(response)
@@ -250,6 +259,8 @@ async def _extract_without_zoom(
     manifest_json: str,
     blank_page_note: str,
     ocr_context: str,
+    *,
+    flash_model: str | None = None,
 ) -> str:
     """Original extraction path: send full page images to the model."""
     all_images = []
@@ -271,8 +282,9 @@ async def _extract_without_zoom(
         image_labels, extractable_qids, manifest_json, blank_page_note, ocr_context
     )
 
+    model = flash_model or config.FLASH_MODEL
     return await call_vision(
-        client, config.FLASH_MODEL, prompt, all_images, temperature=0.1
+        client, model, prompt, all_images, temperature=0.1
     )
 
 
@@ -285,6 +297,8 @@ async def _extract_with_zoom(
     manifest_json: str,
     blank_page_note: str,
     ocr_context: str,
+    *,
+    flash_model: str | None = None,
 ) -> str:
     """Zoom extraction path: detect regions, crop, and send crops + full pages."""
 
@@ -356,8 +370,9 @@ async def _extract_with_zoom(
         image_labels, extractable_qids, manifest_json, blank_page_note, ocr_context
     )
 
+    model = flash_model or config.FLASH_MODEL
     return await call_vision(
-        client, config.FLASH_MODEL, prompt, all_images, temperature=0.1
+        client, model, prompt, all_images, temperature=0.1
     )
 
 

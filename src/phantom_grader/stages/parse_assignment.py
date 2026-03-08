@@ -32,6 +32,8 @@ async def parse_assignment(
     blank_dir: Path,
     points_path: Path,
     assignment_name: str | None = None,
+    *,
+    flash_model: str | None = None,
 ) -> QuestionManifest:
     """Stage 1: Analyze blank template pages and extract question structure."""
 
@@ -85,8 +87,9 @@ Return ONLY valid JSON in this exact format:
 }}
 ```"""
 
+    model = flash_model or config.FLASH_MODEL
     response = await call_vision(
-        client, config.FLASH_MODEL, prompt, images, temperature=0.1
+        client, model, prompt, images, temperature=0.1
     )
 
     data = extract_json_from_response(response)
