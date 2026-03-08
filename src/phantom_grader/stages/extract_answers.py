@@ -134,8 +134,27 @@ async def extract_student_answers(
 
     flash = flash_model or config.FLASH_MODEL
 
+    # ── Identify MCQ-heavy pages (exempt from blank detection) ──
+    # Pages where any question is MCQ should never be auto-skipped, because
+    # a student who answered MCQs correctly produces pages visually identical
+    # to the blank template (their selected bubble matches the answer key).
+    mcq_pages: set[int] = set()
+    for q in manifest.questions:
+        if q.type == "mcq":
+            mcq_pages.add(q.page)
+
     # ── Step 0: Vision-based blank page detection ──
     blank_pages = await _detect_blank_pages_vision(client, student_paths, flash_model=flash)
+
+    # Override: never mark MCQ pages as blank
+    for page_num in mcq_pages:
+        if page_num in blank_pages and blank_pages[page_num]:
+            logger.info(
+                "Page %d has MCQ questions — overriding blank detection (was marked blank)",
+                page_num,
+            )
+            blank_pages[page_num] = False
+
     blank_page_nums = sorted([p for p, is_blank in blank_pages.items() if is_blank])
     non_blank_page_nums = sorted([p for p, is_blank in blank_pages.items() if not is_blank])
 
