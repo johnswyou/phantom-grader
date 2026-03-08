@@ -256,27 +256,62 @@ Return ONLY valid JSON:
         page_str = str(page)
         page_totals[page_str] = page_totals.get(page_str, 0) + grade.points_earned
 
-    # Enforce page caps from manifest
+    # Enforce page caps from manifest — re-grade pages with large overages
     scaled_pages: list[str] = []
+    regraded_pages: list[str] = []
     for page_str, cap in manifest.points_per_page.items():
-        if page_str in page_totals and page_totals[page_str] > cap:
-            overage = page_totals[page_str] - cap
-            if overage > 2:
-                # Large overage: log a prominent warning
-                # TODO: implement re-grade loop for pages that exceed cap by > 2 points
-                logger.warning(
-                    "Page %s for %s exceeds cap by %.1f points (%.1f > %d). "
-                    "Consider re-grading this page.",
-                    page_str, extraction.student_name, overage, page_totals[page_str], cap,
-                )
-            # Scale down proportionally (for both small and large overages)
-            ratio = cap / page_totals[page_str]
-            for qid, grade in grades.items():
+        if page_str not in page_totals or page_totals[page_str] <= cap:
+            continue
+        overage = page_totals[page_str] - cap
+        if overage > 2:
+            # Large overage: attempt re-grade for this page's questions
+            logger.warning(
+                "Page %s for %s exceeds cap by %.1f points (%.1f > %d). Re-grading page.",
+                page_str, extraction.student_name, overage, page_totals[page_str], cap,
+            )
+            page_qids = [qid for qid in grades if str(qid_to_page.get(qid, 0)) == page_str]
+            regraded = await _regrade_page(
+                client, extraction, rubric, solutions, page_str, page_qids, cap,
+                student_dir, blank_dir, model=model,
+            )
+            if regraded is not None:
+                # Verify the re-grade respects the cap
+                regrade_total = sum(g.points_earned for g in regraded.values())
+                if regrade_total <= cap + 0.1:
+                    for qid, new_grade in regraded.items():
+                        grades[qid] = new_grade
+                    page_totals[page_str] = regrade_total
+                    regraded_pages.append(page_str)
+                    logger.info(
+                        "Re-grade succeeded for page %s: %.1f/%d",
+                        page_str, regrade_total, cap,
+                    )
+                    continue
+                else:
+                    logger.warning(
+                        "Re-grade for page %s still exceeds cap (%.1f > %d). Falling back to scaling.",
+                        page_str, regrade_total, cap,
+                    )
+
+        # Fallback: scale down proportionally
+        # Recompute page total in case re-grade partially updated
+        current_total = sum(
+            grades[qid].points_earned
+            for qid in grades if str(qid_to_page.get(qid, 0)) == page_str
+        )
+        if current_total > cap:
+            ratio = cap / current_total
+            for qid in grades:
                 if str(qid_to_page.get(qid, 0)) == page_str:
-                    grade.points_earned = round(grade.points_earned * ratio, 1)
+                    grades[qid].points_earned = round(grades[qid].points_earned * ratio, 1)
             page_totals[page_str] = cap
             scaled_pages.append(page_str)
 
+    if regraded_pages:
+        logger.info(
+            "Re-graded page(s) %s for %s to enforce page caps",
+            regraded_pages, extraction.student_name,
+        )
     if scaled_pages:
         logger.warning(
             "Proportionally scaled grades on page(s) %s for %s to enforce page caps",
@@ -292,3 +327,103 @@ Return ONLY valid JSON:
         page_totals=page_totals,
         total={"earned": total_earned, "possible": total_possible},
     )
+
+
+async def _regrade_page(
+    client: genai.Client,
+    extraction: StudentExtraction,
+    rubric: Rubric,
+    solutions: SolutionManual,
+    page_str: str,
+    page_qids: list[str],
+    page_cap: int,
+    student_dir: Path,
+    blank_dir: Path,
+    *,
+    model: str,
+) -> dict[str, QuestionGrade] | None:
+    """Re-grade a single page's questions with an explicit point cap constraint.
+
+    Returns a dict of new QuestionGrade objects, or None if the call fails.
+    """
+    student_paths = image_paths_from_dir(student_dir)
+    blank_paths = image_paths_from_dir(blank_dir)
+
+    page_num = int(page_str)
+    images = []
+    image_labels = []
+
+    # Blank template page for this page
+    if page_num - 1 < len(blank_paths):
+        images.append(load_image_part(blank_paths[page_num - 1]))
+        image_labels.append(f"BLANK template page {page_num}")
+
+    # Student page
+    if page_num - 1 < len(student_paths):
+        images.append(load_image_part(student_paths[page_num - 1]))
+        image_labels.append(f"STUDENT submission page {page_num}")
+
+    # Build context for just this page's questions
+    page_rubric = {qid: rubric.rubric[qid].model_dump() for qid in page_qids if qid in rubric.rubric}
+    page_solutions = {qid: solutions.solutions[qid].model_dump() for qid in page_qids if qid in solutions.solutions}
+    page_extraction = {qid: extraction.answers[qid].model_dump() for qid in page_qids if qid in extraction.answers}
+
+    prompt = f"""You are an expert AP Physics / Math grader. You previously graded this page but the total
+points exceeded the page maximum. Re-grade these questions carefully.
+
+I'm showing you:
+{chr(10).join(f"- Image {i+1}: {label}" for i, label in enumerate(image_labels))}
+
+STUDENT: {extraction.student_name}
+
+Questions to grade on this page: {json.dumps(page_qids)}
+
+STUDENT ANSWERS (extracted):
+{json.dumps(page_extraction, indent=2, default=str)}
+
+CORRECT SOLUTIONS:
+{json.dumps(page_solutions, indent=2, default=str)}
+
+RUBRIC:
+{json.dumps(page_rubric, indent=2, default=str)}
+
+HARD CONSTRAINT: The total points earned across ALL questions on this page MUST NOT exceed {page_cap}.
+The page has a maximum of {page_cap} points. Be strict. Only award points when criteria are clearly met.
+
+Return ONLY valid JSON:
+```json
+{{
+  "grades": {{
+    "Q1": {{
+      "points_earned": 2,
+      "points_possible": 2,
+      "correct": true,
+      "criteria_breakdown": [
+        {{"criterion": "Correct answer", "earned": 2, "possible": 2, "note": ""}}
+      ],
+      "feedback": "Correct."
+    }}
+  }}
+}}
+```"""
+
+    try:
+        response = await call_vision(client, model, prompt, images, temperature=0.1)
+        data = extract_json_from_response(response)
+
+        result: dict[str, QuestionGrade] = {}
+        for qid, grade_data in data.get("grades", {}).items():
+            criteria = [
+                CriterionGrade(**c) for c in grade_data.get("criteria_breakdown", [])
+            ]
+            result[qid] = QuestionGrade(
+                points_earned=grade_data["points_earned"],
+                points_possible=grade_data["points_possible"],
+                correct=grade_data.get("correct"),
+                criteria_breakdown=criteria,
+                feedback=grade_data.get("feedback", ""),
+            )
+        return result
+    except Exception as e:
+        logger.warning("Re-grade failed for page %s: %s", page_str, e)
+        return None

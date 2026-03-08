@@ -18,6 +18,9 @@ dependencies = [
     "rich>=13.0",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
 [project.scripts]
 phantom-grader = "phantom_grader.cli:app"
 
