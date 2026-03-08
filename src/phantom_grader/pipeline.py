@@ -59,28 +59,12 @@ def discover_students(student_dir: Path) -> list[tuple[str, Path]]:
     return results
 
 
-def find_ocr_text(ocr_dir: Path | None, student_name: str) -> str | None:
-    """Find OCR markdown file for a student, if available."""
-    if ocr_dir is None:
-        return None
-    ocr_dir = Path(ocr_dir)
-    if not ocr_dir.exists():
-        return None
-
-    # Look for a file matching the student name
-    for f in ocr_dir.iterdir():
-        if f.suffix == ".md" and student_name in f.name:
-            return f.read_text()
-    return None
-
-
 async def run_pipeline(
     blank_dir: Path,
     student_dir: Path,
     points_file: Path,
     output_dir: Path,
     api_key: str,
-    ocr_dir: Path | None = None,
     student_filter: str | None = None,
     *,
     flash_model: str | None = None,
@@ -168,8 +152,6 @@ async def run_pipeline(
         async with sem:
             console.print(f"\n[bold blue]Stage 3:[/] Extracting answers for [cyan]{name}[/]...")
 
-            ocr_text = find_ocr_text(ocr_dir, name)
-
             extraction_path = output_dir / f"student_extraction_{name.replace(' ', '_')}.json"
             if extraction_path.exists():
                 console.print(f"  Loading cached extraction for {name}...")
@@ -178,7 +160,7 @@ async def run_pipeline(
                 )
             else:
                 extraction = await extract_student_answers(
-                    client, manifest, stu_dir, name, blank_dir, ocr_text,
+                    client, manifest, stu_dir, name, blank_dir,
                     flash_model=flash_model,
                 )
                 _save_json(extraction, extraction_path)

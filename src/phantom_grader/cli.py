@@ -38,7 +38,6 @@ def grade(
     student_dir: Optional[Path] = typer.Option(None, "--student-dir", help="Directory of student submission subdirs"),
     points_file: Path = typer.Option(..., "--points-file", help="MAX_POINTS_PER_PAGE.txt"),
     output_dir: Path = typer.Option("graded_output", "--output-dir", help="Output directory"),
-    ocr_dir: Optional[Path] = typer.Option(None, "--ocr-dir", help="Directory of OCR markdown files"),
     api_key: Optional[str] = typer.Option(None, "--api-key", help="Gemini API key"),
     student: Optional[str] = typer.Option(None, "--student", help="Grade only this student (name filter)"),
     flash_model: Optional[str] = typer.Option(None, "--flash-model", help="Override Flash model name"),
@@ -85,7 +84,7 @@ def grade(
 
     key = config.get_api_key(api_key)
     _run(run_pipeline(
-        blank_dir, student_dir, points_file, output_dir, key, ocr_dir, student,
+        blank_dir, student_dir, points_file, output_dir, key, student,
         flash_model=flash_model, pro_model=pro_model,
     ))
 
@@ -153,7 +152,6 @@ def extract_cmd(
     student: str = typer.Option(..., "--student", help="Student name"),
     blank_dir: Path = typer.Option(..., "--blank-dir", help="Directory of blank template images"),
     output: Path = typer.Option("extraction.json", "--output", help="Output JSON path"),
-    ocr_file: Optional[Path] = typer.Option(None, "--ocr-file", help="OCR markdown file"),
     api_key: Optional[str] = typer.Option(None, "--api-key", help="Gemini API key"),
     flash_model: Optional[str] = typer.Option(None, "--flash-model", help="Override Flash model name"),
 ):
@@ -167,9 +165,8 @@ def extract_cmd(
 
     async def _run_extract():
         m = QuestionManifest.model_validate_json(Path(manifest).read_text())
-        ocr_text = Path(ocr_file).read_text() if ocr_file else None
         extraction = await extract_student_answers(
-            client, m, student_dir, student, blank_dir, ocr_text,
+            client, m, student_dir, student, blank_dir,
             flash_model=flash_model,
         )
         Path(output).write_text(extraction.model_dump_json(indent=2))

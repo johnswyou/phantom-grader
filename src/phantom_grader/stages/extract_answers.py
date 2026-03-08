@@ -97,7 +97,6 @@ async def extract_student_answers(
     student_dir: Path,
     student_name: str,
     blank_dir: Path,
-    ocr_text: str | None = None,
     *,
     flash_model: str | None = None,
 ) -> StudentExtraction:
@@ -189,17 +188,6 @@ Questions on those pages are pre-marked as unanswered — do NOT extract answers
 Only extract answers for questions on pages: {non_blank_page_nums}.
 """
 
-    ocr_context = ""
-    if ocr_text:
-        max_ocr = 4000
-        truncated = ocr_text[:max_ocr] + ("..." if len(ocr_text) > max_ocr else "")
-        ocr_context = f"""
-
-OCR text from the student's submission (for cross-reference only — images are primary source):
----
-{truncated}
----"""
-
     if config.ENABLE_ZOOM:
         response = await _extract_with_zoom(
             client,
@@ -209,7 +197,6 @@ OCR text from the student's submission (for cross-reference only — images are 
             extractable_qids,
             manifest_json,
             blank_page_note,
-            ocr_context,
             flash_model=flash,
         )
     else:
@@ -221,7 +208,6 @@ OCR text from the student's submission (for cross-reference only — images are 
             extractable_qids,
             manifest_json,
             blank_page_note,
-            ocr_context,
             flash_model=flash,
         )
 
@@ -258,7 +244,6 @@ async def _extract_without_zoom(
     extractable_qids: list[str],
     manifest_json: str,
     blank_page_note: str,
-    ocr_context: str,
     *,
     flash_model: str | None = None,
 ) -> str:
@@ -279,7 +264,7 @@ async def _extract_without_zoom(
             image_labels.append(f"STUDENT submission page {page_num}")
 
     prompt = _build_extraction_prompt(
-        image_labels, extractable_qids, manifest_json, blank_page_note, ocr_context
+        image_labels, extractable_qids, manifest_json, blank_page_note
     )
 
     model = flash_model or config.FLASH_MODEL
@@ -296,7 +281,6 @@ async def _extract_with_zoom(
     extractable_qids: list[str],
     manifest_json: str,
     blank_page_note: str,
-    ocr_context: str,
     *,
     flash_model: str | None = None,
 ) -> str:
@@ -367,7 +351,7 @@ async def _extract_with_zoom(
             image_labels.append(f"FULL PAGE (reference) — student page {page_num}")
 
     prompt = _build_zoom_extraction_prompt(
-        image_labels, extractable_qids, manifest_json, blank_page_note, ocr_context
+        image_labels, extractable_qids, manifest_json, blank_page_note
     )
 
     model = flash_model or config.FLASH_MODEL
@@ -381,7 +365,6 @@ def _build_extraction_prompt(
     extractable_qids: list[str],
     manifest_json: str,
     blank_page_note: str,
-    ocr_context: str,
 ) -> str:
     """Build the extraction prompt for the non-zoom path."""
     return f"""You are an expert at analyzing handwritten student submissions for physics/math assignments.
@@ -399,7 +382,7 @@ Here is the question manifest:
 
 Question IDs to extract (ONLY these):
 {json.dumps(extractable_qids)}
-{blank_page_note}{ocr_context}
+{blank_page_note}
 
 YOUR TASK: For each question ID listed above, extract the student's answer from their submission pages.
 
@@ -456,7 +439,6 @@ def _build_zoom_extraction_prompt(
     extractable_qids: list[str],
     manifest_json: str,
     blank_page_note: str,
-    ocr_context: str,
 ) -> str:
     """Build the extraction prompt for the zoom path with crops and full-page references."""
     return f"""You are an expert at analyzing handwritten student submissions for physics/math assignments.
@@ -482,7 +464,7 @@ Here is the question manifest:
 
 Question IDs to extract (ONLY these):
 {json.dumps(extractable_qids)}
-{blank_page_note}{ocr_context}
+{blank_page_note}
 
 YOUR TASK: For each question ID listed above, extract the student's answer from the provided images.
 Use the CROPPED regions as your primary source for reading fine details (handwriting, equations,
