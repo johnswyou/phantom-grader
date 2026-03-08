@@ -6,8 +6,10 @@ from pathlib import Path
 
 import pymupdf  # PyMuPDF
 
+from .. import config
 
-def pdf_to_images(pdf_path: Path, output_dir: Path, dpi: int = 200) -> list[Path]:
+
+def pdf_to_images(pdf_path: Path, output_dir: Path, dpi: int = config.DEFAULT_PDF_DPI) -> list[Path]:
     """Convert a PDF to a directory of JPEG page images.
 
     Returns list of output image paths, sorted by page number.

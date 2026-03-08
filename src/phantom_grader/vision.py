@@ -162,6 +162,85 @@ async def call_vision(
     return ""  # unreachable
 
 
+async def detect_content_regions(
+    client: genai.Client,
+    page_image_path: Path,
+    page_number: int,
+) -> list[dict]:
+    """Detect bounding boxes of student-added content regions on a page.
+
+    Returns list of dicts with keys: label, x_pct, y_pct, w_pct, h_pct, content_type.
+    content_type is one of: 'handwriting', 'pasted_image', 'filled_bubbles', 'diagram'.
+    All coordinates are percentages of page dimensions.
+    """
+    image_part = load_image_part(page_image_path)
+
+    prompt = f"""Analyze this student assignment page (page {page_number}) and identify ALL regions
+where the student has added their own content. Return bounding boxes as percentages of page
+width and height.
+
+Identify these types of student-added content:
+- **handwriting**: Equations, text, calculations written by hand
+- **pasted_image**: Pasted images of handwritten solutions
+- **filled_bubbles**: Colored/filled MCQ bubbles that the student selected (distinct from template)
+- **diagram**: Drawn diagrams, graphs, or figures
+
+IMPORTANT: Ignore pre-printed template content (questions, headers, page numbers, pre-marked
+answer keys). Only detect regions where the student added something.
+
+Return bounding boxes as percentages (0-100) of the page dimensions:
+- x_pct: left edge as % of page width
+- y_pct: top edge as % of page height
+- w_pct: width as % of page width
+- h_pct: height as % of page height
+
+Return ONLY valid JSON:
+```json
+{{
+  "regions": [
+    {{
+      "label": "Handwritten solution for Q1",
+      "x_pct": 10.0,
+      "y_pct": 25.0,
+      "w_pct": 80.0,
+      "h_pct": 30.0,
+      "content_type": "handwriting"
+    }},
+    {{
+      "label": "MCQ bubble selection",
+      "x_pct": 5.0,
+      "y_pct": 60.0,
+      "w_pct": 40.0,
+      "h_pct": 5.0,
+      "content_type": "filled_bubbles"
+    }}
+  ]
+}}
+```"""
+
+    try:
+        response = await call_vision(
+            client, config.FLASH_MODEL, prompt, [image_part], temperature=0.1
+        )
+        data = extract_json_from_response(response)
+        regions = data.get("regions", [])
+
+        # Filter out regions smaller than MIN_REGION_SIZE_PCT by area
+        min_area = config.MIN_REGION_SIZE_PCT
+        regions = [
+            r for r in regions
+            if r.get("w_pct", 0) * r.get("h_pct", 0) >= min_area
+        ]
+
+        return regions
+    except Exception as e:
+        print(
+            f"  [debug] Region detection failed for page {page_number}: {e}",
+            file=sys.stderr,
+        )
+        return []
+
+
 def extract_json_from_response(text: str) -> Any:
     """Extract JSON from a Gemini response, handling markdown code fences."""
     if not text or not text.strip():
