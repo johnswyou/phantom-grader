@@ -21,12 +21,63 @@ from ..models import (
 )
 from ..vision import (
     call_vision,
-    extract_json_from_response,
     image_paths_from_dir,
     load_image_part,
 )
 
 logger = logging.getLogger(__name__)
+
+
+SOLVE_PAGE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "solutions": {
+            "type": "OBJECT",
+            "additionalProperties": {
+                "type": "OBJECT",
+                "properties": {
+                    "answer": {"type": "STRING"},
+                    "explanation": {"type": "STRING"},
+                    "key_steps": {"type": "ARRAY", "items": {"type": "STRING"}},
+                },
+                "required": ["answer", "explanation", "key_steps"],
+            },
+        },
+        "rubric": {
+            "type": "OBJECT",
+            "additionalProperties": {
+                "type": "OBJECT",
+                "properties": {
+                    "total_points": {"type": "INTEGER"},
+                    "criteria": {
+                        "type": "ARRAY",
+                        "items": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "points": {"type": "INTEGER"},
+                                "description": {"type": "STRING"},
+                                "type": {"type": "STRING"},
+                            },
+                            "required": ["points", "description", "type"],
+                        },
+                    },
+                },
+                "required": ["total_points", "criteria"],
+            },
+        },
+    },
+    "required": ["solutions", "rubric"],
+}
+
+
+VERIFY_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "correct": {"type": "BOOLEAN"},
+        "issues": {"type": "ARRAY", "items": {"type": "STRING"}},
+    },
+    "required": ["correct", "issues"],
+}
 
 
 async def _solve_page(
@@ -70,33 +121,13 @@ For free-response: break down into meaningful rubric criteria that add up to the
 
 CRITICAL: For questions with sub-parts, distribute the question's total points across the sub-parts reasonably. The sub-part points must sum to the question's total points.
 
-CRITICAL: The sum of all question points on this page MUST equal {page_points}.
-
-Return ONLY valid JSON in this format:
-```json
-{{
-  "solutions": {{
-    "Q1": {{
-      "answer": "A",
-      "explanation": "By Coulomb's law...",
-      "key_steps": ["step1", "step2"]
-    }}
-  }},
-  "rubric": {{
-    "Q1": {{
-      "total_points": 2,
-      "criteria": [
-        {{"points": 2, "description": "Correct answer (A)", "type": "all_or_nothing"}}
-      ]
-    }}
-  }}
-}}
-```"""
+CRITICAL: The sum of all question points on this page MUST equal {page_points}."""
 
     response = await call_vision(
-        client, model, prompt, [image], temperature=0.1
+        client, model, prompt, [image], temperature=0.1,
+        response_schema=SOLVE_PAGE_SCHEMA,
     )
-    return extract_json_from_response(response)
+    return json.loads(response)
 
 
 async def generate_solutions_and_rubric(
@@ -214,22 +245,14 @@ Points: {q.points}
 Proposed solution:
 Answer: {solution.answer}
 Explanation: {solution.explanation}
-Key steps: {json.dumps(solution.key_steps)}
-
-Respond with ONLY valid JSON:
-```json
-{{"correct": true, "issues": []}}
-```
-or
-```json
-{{"correct": false, "issues": ["list of issues"]}}
-```"""
+Key steps: {json.dumps(solution.key_steps)}"""
 
         images = [page_image] if page_image else None
 
         async def _verify(qid_inner: str, p: str, imgs):
-            resp = await call_vision(client, model, p, imgs, temperature=0.1)
-            return qid_inner, extract_json_from_response(resp)
+            resp = await call_vision(client, model, p, imgs, temperature=0.1,
+                                     response_schema=VERIFY_SCHEMA)
+            return qid_inner, json.loads(resp)
 
         llm_tasks.append(asyncio.ensure_future(_verify(qid, prompt, images)))
 

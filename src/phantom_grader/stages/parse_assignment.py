@@ -9,7 +9,32 @@ from google import genai
 
 from .. import config
 from ..models import Question, QuestionManifest
-from ..vision import call_vision, extract_json_from_response, load_images_from_dir
+from ..vision import call_vision, load_images_from_dir
+
+
+MANIFEST_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "questions": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "id": {"type": "STRING"},
+                    "page": {"type": "INTEGER"},
+                    "type": {"type": "STRING"},
+                    "options": {"type": "ARRAY", "items": {"type": "STRING"}},
+                    "points": {"type": "INTEGER"},
+                    "text_snippet": {"type": "STRING"},
+                    "embedded_answer": {"type": "STRING", "nullable": True},
+                    "sub_parts": {"type": "ARRAY", "items": {"type": "STRING"}},
+                },
+                "required": ["id", "page", "type", "points", "text_snippet", "options", "sub_parts"],
+            },
+        },
+    },
+    "required": ["questions"],
+}
 
 
 def parse_points_file(points_path: Path) -> dict[str, int]:
@@ -67,32 +92,15 @@ IMPORTANT RULES:
 - Free response questions vary in points based on complexity.
 - The sum of question points on each page MUST equal the page's point allocation.
 - If a question has sub-parts, the question ID is like "Q14" and sub_parts would be ["A", "B"].
-- Number questions sequentially across the entire assignment.
-
-Return ONLY valid JSON in this exact format:
-```json
-{{
-  "questions": [
-    {{
-      "id": "Q1",
-      "page": 1,
-      "type": "mcq",
-      "options": ["A", "B", "C", "D", "E"],
-      "points": 2,
-      "text_snippet": "Two electric objects...",
-      "embedded_answer": null,
-      "sub_parts": []
-    }}
-  ]
-}}
-```"""
+- Number questions sequentially across the entire assignment."""
 
     model = flash_model or config.FLASH_MODEL
     response = await call_vision(
-        client, model, prompt, images, temperature=0.1
+        client, model, prompt, images, temperature=0.1,
+        response_schema=MANIFEST_SCHEMA,
     )
 
-    data = extract_json_from_response(response)
+    data = json.loads(response)
     questions = []
     for q in data["questions"]:
         # Normalize nulls to empty lists for list fields

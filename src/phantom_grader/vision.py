@@ -125,10 +125,12 @@ async def call_vision(
     images: list[types.Part] | None = None,
     temperature: float = 0.2,
     max_output_tokens: int = 65536,
+    response_schema: Any | None = None,
 ) -> str:
     """Call the Gemini vision API with retry logic.
 
-    Returns the text response.
+    Returns the text response. When response_schema is provided, the response
+    is guaranteed to be valid JSON matching the schema.
     """
     sem = _get_model_semaphore(model)
 
@@ -137,14 +139,22 @@ async def call_vision(
         contents.extend(images)
     contents.append(prompt)
 
+    # Build thinking config — disable thought output when using structured output
+    thinking_kwargs: dict[str, Any] = {"thinking_budget": 8192}
+    if response_schema is not None:
+        thinking_kwargs["include_thoughts"] = False
+
     # Build generation config
-    gen_config = types.GenerateContentConfig(
-        temperature=temperature,
-        max_output_tokens=max_output_tokens,
-        thinking_config=types.ThinkingConfig(
-            thinking_budget=8192,
-        ),
-    )
+    gen_config_kwargs: dict[str, Any] = {
+        "temperature": temperature,
+        "max_output_tokens": max_output_tokens,
+        "thinking_config": types.ThinkingConfig(**thinking_kwargs),
+    }
+    if response_schema is not None:
+        gen_config_kwargs["response_mime_type"] = "application/json"
+        gen_config_kwargs["response_schema"] = response_schema
+
+    gen_config = types.GenerateContentConfig(**gen_config_kwargs)
 
     last_error = None
     for attempt in range(config.API_RETRY_ATTEMPTS):
@@ -167,6 +177,29 @@ async def call_vision(
                     f"Gemini API call failed after {config.API_RETRY_ATTEMPTS} attempts: {last_error}"
                 ) from last_error
     return ""  # unreachable
+
+
+CONTENT_REGIONS_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "regions": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "label": {"type": "STRING"},
+                    "x_pct": {"type": "NUMBER"},
+                    "y_pct": {"type": "NUMBER"},
+                    "w_pct": {"type": "NUMBER"},
+                    "h_pct": {"type": "NUMBER"},
+                    "content_type": {"type": "STRING"},
+                },
+                "required": ["label", "x_pct", "y_pct", "w_pct", "h_pct", "content_type"],
+            },
+        },
+    },
+    "required": ["regions"],
+}
 
 
 async def detect_content_regions(
@@ -199,37 +232,14 @@ Return bounding boxes as percentages (0-100) of the page dimensions:
 - x_pct: left edge as % of page width
 - y_pct: top edge as % of page height
 - w_pct: width as % of page width
-- h_pct: height as % of page height
-
-Return ONLY valid JSON:
-```json
-{{
-  "regions": [
-    {{
-      "label": "Handwritten solution for Q1",
-      "x_pct": 10.0,
-      "y_pct": 25.0,
-      "w_pct": 80.0,
-      "h_pct": 30.0,
-      "content_type": "handwriting"
-    }},
-    {{
-      "label": "MCQ bubble selection",
-      "x_pct": 5.0,
-      "y_pct": 60.0,
-      "w_pct": 40.0,
-      "h_pct": 5.0,
-      "content_type": "filled_bubbles"
-    }}
-  ]
-}}
-```"""
+- h_pct: height as % of page height"""
 
     try:
         response = await call_vision(
-            client, config.FLASH_MODEL, prompt, [image_part], temperature=0.1
+            client, config.FLASH_MODEL, prompt, [image_part], temperature=0.1,
+            response_schema=CONTENT_REGIONS_SCHEMA,
         )
-        data = extract_json_from_response(response)
+        data = json.loads(response)
         regions = data.get("regions", [])
 
         # Filter out regions smaller than MIN_REGION_SIZE_PCT by area

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 
 from google import genai
@@ -18,11 +19,59 @@ from ..utils.image import crop_region_to_part
 from ..vision import (
     call_vision,
     detect_content_regions,
-    extract_json_from_response,
     load_image_part,
     load_images_from_dir,
     image_paths_from_dir,
 )
+
+logger = logging.getLogger(__name__)
+
+
+BLANK_PAGES_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "pages": {
+            "type": "OBJECT",
+            "additionalProperties": {
+                "type": "OBJECT",
+                "properties": {
+                    "has_student_work": {"type": "BOOLEAN"},
+                    "evidence": {"type": "STRING"},
+                },
+                "required": ["has_student_work", "evidence"],
+            },
+        },
+    },
+    "required": ["pages"],
+}
+
+
+EXTRACTION_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "answers": {
+            "type": "OBJECT",
+            "additionalProperties": {
+                "type": "OBJECT",
+                "properties": {
+                    "response_type": {"type": "STRING"},
+                    "selected": {"type": "STRING", "nullable": True},
+                    "work_shown": {"type": "STRING"},
+                    "final_answer": {"type": "STRING"},
+                    "confidence": {"type": "NUMBER"},
+                    "evidence": {"type": "STRING"},
+                    "source_pages": {"type": "ARRAY", "items": {"type": "INTEGER"}},
+                    "alignment_method": {"type": "STRING"},
+                    "flags": {"type": "ARRAY", "items": {"type": "STRING"}},
+                },
+                "required": ["response_type", "confidence", "evidence", "source_pages"],
+            },
+        },
+        "unanswered": {"type": "ARRAY", "items": {"type": "STRING"}},
+        "alignment_warnings": {"type": "ARRAY", "items": {"type": "STRING"}},
+    },
+    "required": ["answers", "unanswered", "alignment_warnings"],
+}
 
 
 async def _detect_blank_pages_vision(
@@ -61,25 +110,15 @@ answer key markings, page numbers, class codes, etc. — with NO student additio
 
 IMPORTANT: Some templates have a pre-marked answer key (correct answers shown as filled/highlighted
 bubbles). These are TEMPLATE markings, NOT student work. If a page only has these template markings
-and no additional student selections, it is BLANK.
-
-Return ONLY valid JSON:
-```json
-{{
-  "pages": {{
-    "1": {{"has_student_work": true, "evidence": "Student wrote equations in the answer area"}},
-    "2": {{"has_student_work": false, "evidence": "Only printed template, no student additions"}},
-    "3": {{"has_student_work": true, "evidence": "Pasted image of handwritten solution"}}
-  }}
-}}
-```"""
+and no additional student selections, it is BLANK."""
 
     model = flash_model or config.FLASH_MODEL
     response = await call_vision(
-        client, model, prompt, images, temperature=0.1
+        client, model, prompt, images, temperature=0.1,
+        response_schema=BLANK_PAGES_SCHEMA,
     )
 
-    data = extract_json_from_response(response)
+    data = json.loads(response)
 
     result = {}
     pages_data = data.get("pages", {})
@@ -230,7 +269,7 @@ Only extract answers for questions on pages: {non_blank_page_nums}.
             flash_model=flash,
         )
 
-    data = extract_json_from_response(response)
+    data = json.loads(response)
 
     # Parse answers
     answers = {}
@@ -288,7 +327,8 @@ async def _extract_without_zoom(
 
     model = flash_model or config.FLASH_MODEL
     return await call_vision(
-        client, model, prompt, all_images, temperature=0.1
+        client, model, prompt, all_images, temperature=0.1,
+        response_schema=EXTRACTION_SCHEMA,
     )
 
 
@@ -375,7 +415,8 @@ async def _extract_with_zoom(
 
     model = flash_model or config.FLASH_MODEL
     return await call_vision(
-        client, model, prompt, all_images, temperature=0.1
+        client, model, prompt, all_images, temperature=0.1,
+        response_schema=EXTRACTION_SCHEMA,
     )
 
 
@@ -418,39 +459,7 @@ FREE-RESPONSE RULES:
 1. Look for handwriting, pasted images of handwritten work, typed text added by the student.
 2. Transcribe equations, steps, and final answers.
 3. Handle pasted images that may cover multiple questions — identify which question each
-   part of the image answers using question numbers, sub-part labels, or content matching.
-
-Return ONLY valid JSON:
-```json
-{{
-  "answers": {{
-    "Q1": {{
-      "response_type": "mcq",
-      "selected": "B",
-      "work_shown": "",
-      "final_answer": "B",
-      "confidence": 0.9,
-      "evidence": "Green bubble at option B, clearly a student addition distinct from template",
-      "source_pages": [1],
-      "alignment_method": "spatial",
-      "flags": []
-    }},
-    "Q14A": {{
-      "response_type": "free_response",
-      "selected": null,
-      "work_shown": "Student writes ΔU = mgh...",
-      "final_answer": "0.287 J",
-      "confidence": 0.85,
-      "evidence": "Handwritten work below Q14A",
-      "source_pages": [4],
-      "alignment_method": "spatial+content",
-      "flags": []
-    }}
-  }},
-  "unanswered": ["Q2", "Q3"],
-  "alignment_warnings": []
-}}
-```"""
+   part of the image answers using question numbers, sub-part labels, or content matching."""
 
 
 def _build_zoom_extraction_prompt(
@@ -502,36 +511,4 @@ FREE-RESPONSE RULES:
 1. Look for handwriting, pasted images of handwritten work, typed text added by the student.
 2. Transcribe equations, steps, and final answers.
 3. Handle pasted images that may cover multiple questions — identify which question each
-   part of the image answers using question numbers, sub-part labels, or content matching.
-
-Return ONLY valid JSON:
-```json
-{{
-  "answers": {{
-    "Q1": {{
-      "response_type": "mcq",
-      "selected": "B",
-      "work_shown": "",
-      "final_answer": "B",
-      "confidence": 0.9,
-      "evidence": "Green bubble at option B, clearly a student addition distinct from template",
-      "source_pages": [1],
-      "alignment_method": "spatial",
-      "flags": []
-    }},
-    "Q14A": {{
-      "response_type": "free_response",
-      "selected": null,
-      "work_shown": "Student writes ΔU = mgh...",
-      "final_answer": "0.287 J",
-      "confidence": 0.85,
-      "evidence": "Handwritten work below Q14A",
-      "source_pages": [4],
-      "alignment_method": "spatial+content",
-      "flags": []
-    }}
-  }},
-  "unanswered": ["Q2", "Q3"],
-  "alignment_warnings": []
-}}
-```"""
+   part of the image answers using question numbers, sub-part labels, or content matching."""
