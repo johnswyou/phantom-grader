@@ -9,7 +9,7 @@ from google import genai
 
 from .. import config
 from ..models import Question, QuestionManifest
-from ..vision import call_vision, load_images_from_dir
+from ..vision import call_vision, image_paths_from_dir, load_images_from_dir
 
 
 MANIFEST_SCHEMA = {
@@ -64,7 +64,7 @@ async def parse_assignment(
 
     blank_dir = Path(blank_dir)
     points_per_page = parse_points_file(points_path)
-    total_pages = len(list(blank_dir.glob("*.jpg"))) or len(list(blank_dir.glob("*.png")))
+    total_pages = len(image_paths_from_dir(blank_dir))
 
     if assignment_name is None:
         assignment_name = blank_dir.name.replace("BLANK-", "")

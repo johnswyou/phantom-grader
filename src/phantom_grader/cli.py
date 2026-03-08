@@ -44,6 +44,7 @@ def grade(
     pro_model: Optional[str] = typer.Option(None, "--pro-model", help="Override Pro model name"),
     blank_pdf: Optional[Path] = typer.Option(None, "--blank-pdf", help="Blank template PDF (converted to images)"),
     student_pdf: Optional[Path] = typer.Option(None, "--student-pdf", help="Directory of student PDF files"),
+    force: Optional[str] = typer.Option(None, "--force", help="Force rerun stages (comma-separated: parse,solve,extract,grade,all)"),
 ):
     """Run the full grading pipeline."""
     from .pipeline import run_pipeline
@@ -82,10 +83,13 @@ def grade(
                 pdf_to_images(pdf_file, stem_dir)
         student_dir = student_images_dir
 
+    force_stages = set(force.split(",")) if force else None
+
     key = config.get_api_key(api_key)
     _run(run_pipeline(
         blank_dir, student_dir, points_file, output_dir, key, student,
         flash_model=flash_model, pro_model=pro_model,
+        force_stages=force_stages,
     ))
 
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any
 
@@ -17,21 +16,24 @@ from . import config
 
 logger = logging.getLogger(__name__)
 
-_flash_semaphore: asyncio.Semaphore | None = None
-_pro_semaphore: asyncio.Semaphore | None = None
+_semaphores: dict[int, dict[str, asyncio.Semaphore]] = {}
 
 
 def _get_model_semaphore(model: str) -> asyncio.Semaphore:
-    """Return the appropriate semaphore for the given model."""
-    global _flash_semaphore, _pro_semaphore
-    if "flash" in model.lower():
-        if _flash_semaphore is None:
-            _flash_semaphore = asyncio.Semaphore(config.FLASH_SEMAPHORE_LIMIT)
-        return _flash_semaphore
-    else:
-        if _pro_semaphore is None:
-            _pro_semaphore = asyncio.Semaphore(config.PRO_SEMAPHORE_LIMIT)
-        return _pro_semaphore
+    """Return the appropriate semaphore for the given model.
+
+    Semaphores are created per event loop to avoid cross-loop deadlocks
+    when asyncio.run() is called multiple times (e.g., in tests or
+    when grading multiple assignments sequentially).
+    """
+    loop_id = id(asyncio.get_running_loop())
+    if loop_id not in _semaphores:
+        _semaphores[loop_id] = {
+            "flash": asyncio.Semaphore(config.FLASH_SEMAPHORE_LIMIT),
+            "pro": asyncio.Semaphore(config.PRO_SEMAPHORE_LIMIT),
+        }
+    key = "flash" if "flash" in model.lower() else "pro"
+    return _semaphores[loop_id][key]
 
 
 def get_client(api_key: str) -> genai.Client:
@@ -255,33 +257,4 @@ Return bounding boxes as percentages (0-100) of the page dimensions:
         return []
 
 
-def extract_json_from_response(text: str) -> Any:
-    """Extract JSON from a Gemini response, handling markdown code fences."""
-    if not text or not text.strip():
-        raise ValueError("Empty response text, cannot extract JSON")
 
-    # Try to find JSON in code fences
-    match = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
-    if match:
-        json_str = match.group(1).strip()
-    else:
-        # Try to find a JSON object or array in the text
-        # Look for the first { or [ and last } or ]
-        json_str = text.strip()
-        start = -1
-        for i, c in enumerate(json_str):
-            if c in ('{', '['):
-                start = i
-                break
-        if start >= 0:
-            end_char = '}' if json_str[start] == '{' else ']'
-            end = json_str.rfind(end_char)
-            if end > start:
-                json_str = json_str[start:end + 1]
-
-    try:
-        return json.loads(json_str)
-    except json.JSONDecodeError as e:
-        # Log a snippet for debugging
-        snippet = json_str[:500] if len(json_str) > 500 else json_str
-        raise ValueError(f"Failed to parse JSON from response: {e}\nSnippet: {snippet}") from e

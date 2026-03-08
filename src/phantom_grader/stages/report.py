@@ -6,14 +6,19 @@ import csv
 import io
 from pathlib import Path
 
-from ..models import QuestionManifest, StudentGrades
+from ..models import QuestionManifest, StudentExtraction, StudentGrades
 
 
 def generate_student_report(
     grades: StudentGrades,
     manifest: QuestionManifest,
+    extraction: StudentExtraction | None = None,
 ) -> str:
-    """Generate a detailed markdown report for a single student."""
+    """Generate a detailed markdown report for a single student.
+
+    If extraction is provided, includes what the system extracted for each
+    question (useful for debugging wrong grades).
+    """
 
     lines = [
         f"# Grading Report: {grades.student_name}",
@@ -60,9 +65,32 @@ def generate_student_report(
             )
 
             if grade.correct is not None:
-                status = "Correct" if grade.correct else "Incorrect"
+                status = "✓ Correct" if grade.correct else "✗ Incorrect"
                 lines.append(f"**{status}**")
                 lines.append("")
+
+            # Show extraction data if available
+            if extraction:
+                if qid in extraction.answers:
+                    ans = extraction.answers[qid]
+                    lines.append("**Extracted:**")
+                    if ans.response_type == "mcq" and ans.selected:
+                        lines.append(f"- Selected: **{ans.selected}**")
+                    if ans.final_answer:
+                        lines.append(f"- Final answer: {ans.final_answer}")
+                    if ans.work_shown:
+                        work = ans.work_shown[:300]
+                        if len(ans.work_shown) > 300:
+                            work += "..."
+                        lines.append(f"- Work shown: {work}")
+                    if ans.confidence < 0.7:
+                        lines.append(f"- ⚠️ Low confidence: {ans.confidence:.2f}")
+                    if ans.flags:
+                        lines.append(f"- Flags: {', '.join(ans.flags)}")
+                    lines.append("")
+                elif qid in extraction.unanswered:
+                    lines.append("**Extracted:** *Unanswered (no student work detected)*")
+                    lines.append("")
 
             if grade.criteria_breakdown:
                 lines.append("| Criterion | Earned | Possible | Notes |")
@@ -126,10 +154,11 @@ def generate_class_csv(
     return output.getvalue()
 
 
-async def generate_reports(
+def generate_reports(
     all_grades: list[StudentGrades],
     manifest: QuestionManifest,
     output_dir: Path,
+    extractions: dict[str, StudentExtraction] | None = None,
 ) -> None:
     """Generate all reports and save to output directory."""
 
@@ -139,7 +168,8 @@ async def generate_reports(
 
     # Per-student reports
     for grades in all_grades:
-        report = generate_student_report(grades, manifest)
+        extraction = extractions.get(grades.student_name) if extractions else None
+        report = generate_student_report(grades, manifest, extraction)
         safe_name = grades.student_name.replace(" ", "_").replace("/", "_")
         report_path = reports_dir / f"{safe_name}.md"
         report_path.write_text(report)

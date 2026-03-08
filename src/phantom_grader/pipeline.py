@@ -69,19 +69,26 @@ async def run_pipeline(
     *,
     flash_model: str | None = None,
     pro_model: str | None = None,
+    force_stages: set[str] | None = None,
 ) -> None:
     """Run the full grading pipeline."""
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    force = force_stages or set()
+
     client = get_client(api_key)
+
+    def _use_cache(path: Path, stage: str) -> bool:
+        """Return True if we should use cached output."""
+        return path.exists() and stage not in force and "all" not in force
 
     # ── Stage 1: Parse Assignment ────────────────────────────────────
     console.print("\n[bold blue]Stage 1:[/] Parsing assignment template...")
 
     manifest_path = output_dir / "question_manifest.json"
-    if manifest_path.exists():
+    if _use_cache(manifest_path, "parse"):
         console.print("  Loading cached manifest...")
         manifest = QuestionManifest.model_validate_json(manifest_path.read_text())
     else:
@@ -98,7 +105,7 @@ async def run_pipeline(
 
     solutions_path = output_dir / "solution_manual.json"
     rubric_path = output_dir / "rubric.json"
-    if solutions_path.exists() and rubric_path.exists():
+    if _use_cache(solutions_path, "solve") and _use_cache(rubric_path, "solve"):
         console.print("  Loading cached solutions and rubric...")
         solutions = SolutionManual.model_validate_json(solutions_path.read_text())
         rubric = Rubric.model_validate_json(rubric_path.read_text())
@@ -115,7 +122,7 @@ async def run_pipeline(
 
     # ── Solution Verification ────────────────────────────────────────
     verification_path = output_dir / "solution_verification.json"
-    if not verification_path.exists():
+    if not _use_cache(verification_path, "solve"):
         console.print("  Verifying solutions...")
         verification = await verify_solutions(
             client, manifest, solutions, blank_dir, flash_model=flash_model
@@ -147,13 +154,14 @@ async def run_pipeline(
     # ── Stage 3 + 4: Extract + Grade (per student, parallel) ────────
     sem = asyncio.Semaphore(config.MAX_CONCURRENT_STUDENTS)
     all_grades: list[StudentGrades] = []
+    all_extractions: dict[str, StudentExtraction] = {}
 
     async def process_student(name: str, stu_dir: Path) -> StudentGrades | None:
         async with sem:
             console.print(f"\n[bold blue]Stage 3:[/] Extracting answers for [cyan]{name}[/]...")
 
             extraction_path = output_dir / f"student_extraction_{name.replace(' ', '_')}.json"
-            if extraction_path.exists():
+            if _use_cache(extraction_path, "extract"):
                 console.print(f"  Loading cached extraction for {name}...")
                 extraction = StudentExtraction.model_validate_json(
                     extraction_path.read_text()
@@ -164,6 +172,8 @@ async def run_pipeline(
                     flash_model=flash_model,
                 )
                 _save_json(extraction, extraction_path)
+
+            all_extractions[name] = extraction
 
             n_answered = len(extraction.answers)
             n_unanswered = len(extraction.unanswered)
@@ -178,7 +188,7 @@ async def run_pipeline(
             console.print(f"\n[bold blue]Stage 4:[/] Grading [cyan]{name}[/]...")
 
             grades_path = output_dir / f"student_grades_{name.replace(' ', '_')}.json"
-            if grades_path.exists():
+            if _use_cache(grades_path, "grade"):
                 console.print(f"  Loading cached grades for {name}...")
                 grades = StudentGrades.model_validate_json(grades_path.read_text())
             else:
@@ -199,7 +209,7 @@ async def run_pipeline(
 
     # ── Stage 5: Reports ─────────────────────────────────────────────
     console.print("\n[bold blue]Stage 5:[/] Generating reports...")
-    await generate_reports(all_grades, manifest, output_dir)
+    generate_reports(all_grades, manifest, output_dir, extractions=all_extractions)
     console.print(f"  Reports saved to [green]{output_dir / 'reports'}[/]")
     console.print(f"  Class summary: [green]{output_dir / 'class_summary.csv'}[/]")
 
