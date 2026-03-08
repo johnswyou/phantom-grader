@@ -34,10 +34,11 @@ GRADE_PAGE_SCHEMA = {
     "type": "OBJECT",
     "properties": {
         "grades": {
-            "type": "OBJECT",
-            "additionalProperties": {
+            "type": "ARRAY",
+            "items": {
                 "type": "OBJECT",
                 "properties": {
+                    "question_id": {"type": "STRING"},
                     "points_earned": {"type": "NUMBER"},
                     "points_possible": {"type": "NUMBER"},
                     "correct": {"type": "BOOLEAN"},
@@ -56,7 +57,7 @@ GRADE_PAGE_SCHEMA = {
                     },
                     "feedback": {"type": "STRING"},
                 },
-                "required": ["points_earned", "points_possible", "criteria_breakdown", "feedback"],
+                "required": ["question_id", "points_earned", "points_possible", "criteria_breakdown", "feedback"],
             },
         },
     },
@@ -135,16 +136,19 @@ def validate_grades(
 def _parse_grades_response(data: dict) -> dict[str, QuestionGrade]:
     """Parse a grading response dict into QuestionGrade objects."""
     grades: dict[str, QuestionGrade] = {}
-    for qid, grade_data in data.get("grades", {}).items():
+    for grade_entry in data.get("grades", []):
+        qid = grade_entry.get("question_id")
+        if not qid:
+            continue
         criteria = [
-            CriterionGrade(**c) for c in grade_data.get("criteria_breakdown", [])
+            CriterionGrade(**c) for c in grade_entry.get("criteria_breakdown", [])
         ]
         grades[qid] = QuestionGrade(
-            points_earned=grade_data["points_earned"],
-            points_possible=grade_data["points_possible"],
-            correct=grade_data.get("correct"),
+            points_earned=grade_entry["points_earned"],
+            points_possible=grade_entry["points_possible"],
+            correct=grade_entry.get("correct"),
             criteria_breakdown=criteria,
-            feedback=grade_data.get("feedback", ""),
+            feedback=grade_entry.get("feedback", ""),
         )
     return grades
 

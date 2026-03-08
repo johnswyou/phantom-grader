@@ -32,22 +32,24 @@ SOLVE_PAGE_SCHEMA = {
     "type": "OBJECT",
     "properties": {
         "solutions": {
-            "type": "OBJECT",
-            "additionalProperties": {
+            "type": "ARRAY",
+            "items": {
                 "type": "OBJECT",
                 "properties": {
+                    "question_id": {"type": "STRING"},
                     "answer": {"type": "STRING"},
                     "explanation": {"type": "STRING"},
                     "key_steps": {"type": "ARRAY", "items": {"type": "STRING"}},
                 },
-                "required": ["answer", "explanation", "key_steps"],
+                "required": ["question_id", "answer", "explanation", "key_steps"],
             },
         },
         "rubric": {
-            "type": "OBJECT",
-            "additionalProperties": {
+            "type": "ARRAY",
+            "items": {
                 "type": "OBJECT",
                 "properties": {
+                    "question_id": {"type": "STRING"},
                     "total_points": {"type": "INTEGER"},
                     "criteria": {
                         "type": "ARRAY",
@@ -62,7 +64,7 @@ SOLVE_PAGE_SCHEMA = {
                         },
                     },
                 },
-                "required": ["total_points", "criteria"],
+                "required": ["question_id", "total_points", "criteria"],
             },
         },
     },
@@ -173,14 +175,18 @@ async def generate_solutions_and_rubric(
     all_rubric_items: dict[str, QuestionRubric] = {}
 
     for page_num, data in zip(page_order, results):
-        for qid, sol_data in data.get("solutions", {}).items():
-            all_solutions[qid] = Solution(**sol_data)
-        for qid, rub_data in data.get("rubric", {}).items():
-            criteria = [RubricCriterion(**c) for c in rub_data.get("criteria", [])]
-            all_rubric_items[qid] = QuestionRubric(
-                total_points=rub_data["total_points"],
-                criteria=criteria,
-            )
+        for sol_entry in data.get("solutions", []):
+            qid = sol_entry.pop("question_id", None)
+            if qid:
+                all_solutions[qid] = Solution(**sol_entry)
+        for rub_entry in data.get("rubric", []):
+            qid = rub_entry.pop("question_id", None)
+            if qid:
+                criteria = [RubricCriterion(**c) for c in rub_entry.get("criteria", [])]
+                all_rubric_items[qid] = QuestionRubric(
+                    total_points=rub_entry["total_points"],
+                    criteria=criteria,
+                )
 
     return SolutionManual(solutions=all_solutions), Rubric(rubric=all_rubric_items)
 

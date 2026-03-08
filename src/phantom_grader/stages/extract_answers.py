@@ -31,14 +31,15 @@ BLANK_PAGES_SCHEMA = {
     "type": "OBJECT",
     "properties": {
         "pages": {
-            "type": "OBJECT",
-            "additionalProperties": {
+            "type": "ARRAY",
+            "items": {
                 "type": "OBJECT",
                 "properties": {
+                    "page_number": {"type": "INTEGER"},
                     "has_student_work": {"type": "BOOLEAN"},
                     "evidence": {"type": "STRING"},
                 },
-                "required": ["has_student_work", "evidence"],
+                "required": ["page_number", "has_student_work", "evidence"],
             },
         },
     },
@@ -50,12 +51,13 @@ EXTRACTION_SCHEMA = {
     "type": "OBJECT",
     "properties": {
         "answers": {
-            "type": "OBJECT",
-            "additionalProperties": {
+            "type": "ARRAY",
+            "items": {
                 "type": "OBJECT",
                 "properties": {
+                    "question_id": {"type": "STRING"},
                     "response_type": {"type": "STRING"},
-                    "selected": {"type": "STRING", "nullable": True},
+                    "selected": {"type": "STRING"},
                     "work_shown": {"type": "STRING"},
                     "final_answer": {"type": "STRING"},
                     "confidence": {"type": "NUMBER"},
@@ -64,7 +66,7 @@ EXTRACTION_SCHEMA = {
                     "alignment_method": {"type": "STRING"},
                     "flags": {"type": "ARRAY", "items": {"type": "STRING"}},
                 },
-                "required": ["response_type", "confidence", "evidence", "source_pages"],
+                "required": ["question_id", "response_type", "confidence", "evidence", "source_pages"],
             },
         },
         "unanswered": {"type": "ARRAY", "items": {"type": "STRING"}},
@@ -121,9 +123,8 @@ and no additional student selections, it is BLANK."""
     data = json.loads(response)
 
     result = {}
-    pages_data = data.get("pages", {})
-    for page_str, info in pages_data.items():
-        page_num = int(page_str)
+    for info in data.get("pages", []):
+        page_num = info.get("page_number", 0)
         is_blank = not info.get("has_student_work", True)
         result[page_num] = is_blank
 
@@ -273,8 +274,10 @@ Only extract answers for questions on pages: {non_blank_page_nums}.
 
     # Parse answers
     answers = {}
-    for qid, ans_data in data.get("answers", {}).items():
-        answers[qid] = ExtractedAnswer(**ans_data)
+    for ans_entry in data.get("answers", []):
+        qid = ans_entry.pop("question_id", None)
+        if qid:
+            answers[qid] = ExtractedAnswer(**ans_entry)
 
     # Combine unanswered: blank-page questions + model-reported unanswered
     unanswered = list(set(questions_on_blank_pages + data.get("unanswered", [])))
